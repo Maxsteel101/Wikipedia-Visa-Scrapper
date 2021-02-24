@@ -1,0 +1,283 @@
+---
+title: "where can i enter visas"
+output: html_notebook
+---
+
+```{r}
+#Install packages needed for scrapping wikipedia
+
+library(dplyr)
+library(rvest)
+library(stringr)
+
+#install.packages("reshape")
+library(reshape)
+
+#install.packages("tidyr")
+library(tidyr)
+
+library(shiny)
+library(shinythemes)
+```
+
+```{r}
+#Scrape the urls of every visa page in the wiki category
+
+category.url <- "https://en.wikipedia.org/wiki/Category:Visa_requirements_by_nationality"
+category.url2 <- "https://en.wikipedia.org/w/index.php?title=Category:Visa_requirements_by_nationality&pagefrom=Trinidad+and+Tobago%0AVisa+requirements+for+Trinidad+and+Tobago+citizens#mw-pages"
+```
+
+
+```{r}
+
+#Create function to scrape all urls from page of wiki index
+
+scrape.wiki.index <- function(url){
+
+category.page <- read_html(url)
+
+link.groups <- html_nodes(category.page, ".mw-category-group")
+
+link.groups
+
+visa.page.links <- str_extract_all(link.groups, "(?=/).*(?=title)")
+
+#combine all links onto one column of data
+
+all.links <- merge_recurse(visa.page.links)
+
+all.links <- all.links$x
+
+all.links <- str_replace_all(all.links," ","")
+
+all.links <- str_sub(all.links, end = -2)
+
+all.links
+
+return(all.links)
+}
+```
+
+```{r}
+#scrape data from each index page
+pg1.urls <- scrape.wiki.index(category.url)
+
+pg2.urls <- scrape.wiki.index(category.url2)
+
+#Combine to make complete list
+complete.urls <- c(pg1.urls, pg2.urls)
+
+#Take out any non country pages
+complete.urls <- complete.urls[str_detect(complete.urls, "Visa_requirements")]
+
+#Take out any duplicate
+complete.urls <- unique(complete.urls)
+
+#207 countries in the list
+```
+```{r}
+wikipedia.urls <- c()
+
+for(i in 1:length(complete.urls)){
+  wikipedia.urls[i] <- paste0("https://en.wikipedia.org", complete.urls[i])
+}
+
+```
+
+```{r}
+#Create function to scrape the visa requirements table of one of the pages
+scrape.requirements <- function(url){
+
+
+target.page <- read_html(url)
+
+country.visas <- html_table(target.page, fill = TRUE)[[1]]
+
+country.visas
+
+country.visas$`Visa requirement` <- str_replace_all(country.visas$`Visa requirement`, "[[:digit:]]+", "")
+country.visas$`Visa requirement` <- str_replace_all(country.visas$`Visa requirement`, "\\[|\\]", "")
+
+country.visas <- country.visas[,1:4]
+
+return(country.visas)
+}
+
+```
+
+```{r}
+#Isolate the citizen demonyms from the wikipedia urls
+#To be used as search terms
+
+search.terms <- str_replace_all(wikipedia.urls, "https://en.wikipedia.org/wiki/Visa_requirements_for_","")
+
+search.terms <- str_replace_all(search.terms, "\"class=\"mw-redirect","")
+search.terms <- str_replace_all(search.terms, "holders_of_passports_issued_by_the_","")
+search.terms <- str_replace_all(search.terms, "_citizens","")
+search.terms <- str_replace_all(search.terms, "citizens_of_","")
+search.terms <- str_replace_all(search.terms, "Chinese_of_","")
+search.terms <- str_replace_all(search.terms, "\\(","")
+search.terms <- str_replace_all(search.terms, "\\)","")
+search.terms <- str_replace_all(search.terms, "_"," ") 
+
+```
+
+```{r}
+#Unify links and demonymns into one data frame
+
+visa.data <- data.frame(urls = wikipedia.urls, search = search.terms)
+
+visa.data <- visa.data[2:207,]
+
+visa.data
+
+
+```
+
+
+```{r}
+#Create Shiny app to interact with the data
+
+#Develop UI for the application
+
+ui <- fluidPage(theme = shinytheme("cerulean"),
+
+  # App title ----
+  titlePanel("Where Can I Go?"),
+
+  # Sidebar layout with input and output definitions ----
+  sidebarLayout(
+
+    # Sidebar panel for inputs ----
+    sidebarPanel(
+
+      # Input: Selectors and numeric input of each prediction data point ----
+      selectInput(inputId = "passport",
+                  label = "Passport:",
+                  choices = visa.data$search),
+      
+      selectInput(inputId = "destination",
+                  label = "Travel Destination:",
+                  choices = NULL ),
+      
+    ),
+
+    # Main panel for displaying outputs ----
+    mainPanel(
+      fluidRow(
+        column(4,
+          tableOutput('destination.table')
+        )
+        )
+        )
+  )
+)
+```
+
+```{r}
+#Server for the Shiny App
+
+server <- function(input, output, session) {
+
+  # Return the requested prediction ----
+  
+  #Create a reactive function to filter the car models based on the selected brand
+  chosen.passport <- reactive({
+    filter.passport <- filter(visa.data, search == input$passport)
+    filter.passport[1,1]
+  })
+  
+  #Update the model select input to reflect the filters models for choices
+  observeEvent(chosen.passport(), {
+    choices <- scrape.requirements(chosen.passport())
+    country.choices <- choices$Country
+    updateSelectInput(session, "destination", choices = country.choices)
+  })
+
+  #Uses linear model to generate a predicted value for the provided car
+  output$destination.table <- renderTable({
+    pass.scrape <- scrape.requirements(chosen.passport())
+    pass.scrape[pass.scrape$Country == input$destination,]
+  })
+  
+  
+}  
+```
+
+```{r}
+shinyApp(ui, server)
+```
+
+
+```{r}
+# #Scrape the UN Member Nations links from wikipedia to get the demonyn of each country
+# 
+# member.url <- "https://en.wikipedia.org/wiki/Member_states_of_the_United_Nations"
+# 
+# member.page <- read_html(member.url)
+# 
+# member.states <- html_table(member.page, fill = TRUE)[[2]]
+# 
+# member.state.links <- html_nodes(member.page,".flagicon")
+# 
+# member.state.links <- str_extract_all(member.state.links, "(?=/).*(?=title)")
+# 
+# member.state.links <- str_replace_all(member.state.links," ","")
+# 
+# member.state.links <- str_sub(member.state.links, end = -2)
+# 
+# member.state.links
+# 
+# length(member.state.links)
+```
+```{r}
+# member.state.urls <- c()
+# 
+# for(i in 1:length(member.state.links)){
+#   member.state.urls[i] <- paste0("https://en.wikipedia.org", member.state.links[i])
+# }
+# 
+# member.state.urls
+```
+```{r}
+# #Scrape the demonym of each country page
+# 
+# demonym.url <- "https://en.wikipedia.org/wiki/Demonym"
+# 
+# demonym.page <- read_html(demonym.url)
+# 
+# demonym.info <- html_nodes(demonym.page,,"/html/body/div[3]/div[3]/div[5]/div[1]/div[7]/ul")
+# 
+# demonym.country <- str_extract_all(demonym.info, "(?=>).*(?=<)")
+# 
+# demonym.country <- data.frame(demonym.country)
+# 
+# 
+# demonym.clean <- c()
+# 
+# for(i in 1:nrow(demonym.country)){
+#   
+# demonym.clean[i] <- str_replace(demonym.country[i,],"</a> → ", ",")
+# demonym.clean[i] <- str_replace(demonym.clean[i], ">", "")
+#   
+# }
+# 
+# demonym.clean <- str_replace_all(demonym.clean, "(?=\\().*(?=\\))", "")
+# demonym.clean <- str_replace_all(demonym.clean, "\\)", "")
+# demonym.clean <- str_replace_all(demonym.clean, "(?=\\</a>).*(?=\\</sup>)", "")
+# demonym.clean <- str_replace_all(demonym.clean, "</sup> → ", ",")
+# demonym.clean <- str_replace_all(demonym.clean, ", Fijindians", "")
+# demonym.clean <- str_replace_all(demonym.clean, " or Nevisians", "")
+# 
+# demonym.clean <- data.frame(demonym.clean)
+# 
+# demonym.clean <- separate(data = demonym.clean, col = demonym.clean, into = c("country", "demonym"), sep = ",")
+# 
+# 
+# demonym.clean
+```
+
+
+
+
+
