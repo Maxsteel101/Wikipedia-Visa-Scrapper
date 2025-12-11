@@ -1,0 +1,354 @@
+---
+title: "Can I Enter?"
+output: html_document
+runtime: shiny
+date: "2025-12-03"
+---
+
+```{r}
+#Install packages needed for scrapping wikipedia
+#install.packages("dplyr")
+#install.packages("rvest")
+#install.packages("stringr")
+#install.packages("reshape")
+#install.packages("tidyr")
+#install.packages("shiny")
+#install.packages("shinythemes")
+install.packages("httr")
+
+library(dplyr)
+library(rvest)
+library(stringr)
+library(reshape)
+library(tidyr)
+library(shiny)
+library(shinythemes)
+library(httr)
+```
+```{r}
+#Scrape the urls of every visa page in the wiki category
+
+category.url <- "https://en.wikipedia.org/wiki/Category:Visa_requirements_by_nationality"
+category.url2 <- "https://en.wikipedia.org/w/index.php?title=Category:Visa_requirements_by_nationality&pagefrom=Trinidad+and+Tobago%0AVisa+requirements+for+Trinidad+and+Tobago+citizens#mw-pages"
+```
+```{r}
+scrape.wiki.index <- function(url) {
+
+  category.page <- read_html(url)
+
+  # Get all <a> nodes inside .mw-category-group sections
+  link.nodes <- category.page %>%
+    html_nodes(".mw-category-group a")
+
+  # Extract href attributes as character vector
+  visa.page.links <- html_attr(link.nodes, "href")
+
+  # Keep only valid wiki page URLs if needed
+  visa.page.links <- visa.page.links[grepl("^/wiki/", visa.page.links)]
+
+  # Optional cleanup (if your regex intended to remove ending characters)
+  visa.page.links <- str_replace_all(visa.page.links, " ", "")
+  visa.page.links <- str_sub(visa.page.links, end = -1)
+
+  return(visa.page.links)
+}
+```
+
+```{r}
+#scrape data from each index page
+pg1.urls <- scrape.wiki.index(category.url)
+
+pg2.urls <- scrape.wiki.index(category.url2)
+
+#Combine to make complete list
+complete.urls <- c(pg1.urls, pg2.urls)
+
+#Take out any non country pages
+complete.urls <- complete.urls[str_detect(complete.urls, "Visa_requirements")]
+
+#Take out any duplicate
+complete.urls <- unique(complete.urls)
+
+#207 countries in the list
+```
+```{r}
+wikipedia.urls <- c()
+
+for(i in 1:length(complete.urls)){
+  wikipedia.urls[i] <- paste0("https://en.wikipedia.org", complete.urls[i])
+}
+
+```
+
+```{r}
+#Create function to scrape the visa requirements table of one of the pages
+scrape.requirements <- function(url){
+
+
+target.page <- read_html(url)
+
+country.visas <- html_table(target.page, fill = TRUE)[[1]]
+
+country.visas
+
+country.visas$`Visa requirement` <- str_replace_all(country.visas$`Visa requirement`, "[[:digit:]]+", "")
+country.visas$`Visa requirement` <- str_replace_all(country.visas$`Visa requirement`, "\\[|\\]", "")
+
+country.visas <- country.visas[,1:4]
+
+return(country.visas)
+}
+```
+```{r}
+#Isolate the citizen demonyms from the wikipedia urls
+#To be used as search terms
+
+search.terms <- str_replace_all(wikipedia.urls, "https://en.wikipedia.org/wiki/Visa_requirements_for_","")
+
+search.terms <- str_replace_all(search.terms, "\"class=\"mw-redirect","")
+search.terms <- str_replace_all(search.terms, "holders_of_passports_issued_by_the_","")
+search.terms <- str_replace_all(search.terms, "_citizens","")
+search.terms <- str_replace_all(search.terms, "citizens_of_","")
+search.terms <- str_replace_all(search.terms, "Chinese_of_","")
+search.terms <- str_replace_all(search.terms, "\\(","")
+search.terms <- str_replace_all(search.terms, "\\)","")
+search.terms <- str_replace_all(search.terms, "_"," ") 
+
+```
+
+```{r}
+#Unify links and demonymns into one data frame
+
+visa.data <- data.frame(urls = wikipedia.urls, search = search.terms)
+
+visa.data <- visa.data[2:207,]
+
+View(visa.data)
+```
+
+```{r}
+# Preload all visa tables into a global list
+visa_tables <- list()
+
+for (i in 1:nrow(visa.data)) {
+  url <- visa.data$urls[i]
+  dem <- visa.data$search[i]
+  
+  message("Scraping: ", dem)
+  
+  tbl <- try(scrape.requirements(url), silent = TRUE)
+  
+  if (!inherits(tbl, "try-error")) {
+    visa_tables[[dem]] <- tbl
+  }
+}
+```
+
+```{r}
+# Helper: clean text (remove [1], footnotes, weird whitespace)
+clean_text <- function(x) {
+  x <- as.character(x)
+  x[is.na(x)] <- ""
+  x <- str_replace_all(x, "\\[.*?\\]", "")     # remove bracket refs
+  x <- str_replace_all(x, "\\s+\\n\\s+", " ")  # newlines -> space
+  x <- str_replace_all(x, "\\s+", " ")         # collapse whitespace
+  x <- str_trim(x)
+  x
+}
+
+# Robust function to scrape a single visa page (handles Canadian, US, etc)
+scrape_visa_page <- function(url) {
+  url <- URLencode(url)
+  
+  page <- tryCatch({
+    res <- GET(url, user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)"))
+    if (res$status_code != 200) stop("Failed to fetch page")
+    read_html(res)
+  }, error = function(e) {
+    warning("Failed to read page: ", e$message)
+    return(NULL)
+  })
+  if (is.null(page)) return(NULL)
+  
+  tables <- html_table(page, fill = TRUE)
+  if (length(tables) < 1) {
+    warning("No tables found")
+    return(NULL)
+  }
+  
+  # Function that tries to coerce a raw html_table into a clean country+visa df
+  clean_candidate_table <- function(tbl) {
+    # must have at least 2 columns
+    if (ncol(tbl) < 2) return(NULL)
+    
+    # Keep only first two columns (first col = country, second col = visa/entry)
+    df <- as.data.frame(tbl[, 1:2], stringsAsFactors = FALSE)
+    colnames(df) <- c("Country", "Visa requirement")
+    
+    # Clean text columns
+    df$Country <- clean_text(df$Country)
+    df$`Visa requirement` <- clean_text(df$`Visa requirement`)
+    
+    # Remove rows that are obviously header repeats (e.g., "Country", "State", etc.)
+    bad_country_patterns <- regex("^\\s*(Country|State|Territory|Region|Location)\\s*$", ignore_case = TRUE)
+    df <- df[!str_detect(df$Country, bad_country_patterns), , drop = FALSE]
+    
+    # Remove rows where both columns empty
+    df <- df[!(df$Country == "" & df$`Visa requirement` == ""), , drop = FALSE]
+    
+    # Fill down country names when Wikipedia used rowspan / merged cells
+    # Only fill when Country is empty but Visa requirement is present
+    if (nrow(df) > 0) {
+      df <- df %>% mutate(Country = ifelse(Country == "", NA, Country))
+      df <- df %>% fill(Country, .direction = "down")
+      df$Country[is.na(df$Country)] <- ""  # keep as empty string if still NA
+    }
+    
+    # Remove obvious non-country lines (Notes / See also / References / Source / map legends)
+    non_country_pattern <- regex("\\b(Notes|See also|References|Source|Map legend|Dependent territories|Territories|See also)\\b", ignore_case = TRUE)
+    df <- df[!str_detect(df$Country, non_country_pattern), , drop = FALSE]
+    
+    # Remove rows where Country is short nonsense (one character or purely punctuation)
+    df <- df[!str_detect(df$Country, "^\\W*$"), , drop = FALSE]
+    df <- df[nchar(df$Country) > 1 | df$`Visa requirement` != "", , drop = FALSE]
+    
+    # Remove rows where Visa requirement is empty or contains only punctuation/hyphen
+    df <- df[!str_trim(df$`Visa requirement`) %in% c("", "-", "—", "–"), , drop = FALSE]
+    
+    # Final trimming
+    df$Country <- str_trim(df$Country)
+    df$`Visa requirement` <- str_trim(df$`Visa requirement`)
+    
+    # If after cleaning we have at least one reasonable row, return, else NULL
+    if (nrow(df) >= 1) {
+      # remove duplicated header-like rows where Country equals Visa requirement (rare)
+      df <- df[!(df$Country == df$`Visa requirement`), , drop = FALSE]
+      # also deduplicate exact duplicates
+      df <- distinct(df)
+      rownames(df) <- NULL
+      return(df)
+    } else {
+      return(NULL)
+    }
+  }
+  
+  # First pass: prefer tables where the second column contains visa/entry keywords
+  for (tbl in tables) {
+    if (ncol(tbl) >= 2) {
+      col2 <- as.character(tbl[[2]])
+      col2_lower <- tolower(col2)
+      if (any(grepl("visa|required|not required|entry|e-visa|eta|visa-free|visa free", col2_lower))) {
+        cleaned <- clean_candidate_table(tbl)
+        if (!is.null(cleaned) && nrow(cleaned) >= 5) { # prefer tables with reasonable number of rows
+          return(cleaned)
+        }
+        # if cleaned is plausible but small, return it as acceptable fallback
+        if (!is.null(cleaned) && nrow(cleaned) >= 1) return(cleaned)
+      }
+    }
+  }
+  
+  # Second pass: try cleaning all tables and choose the one that yields the most country rows
+  cleaned_candidates <- lapply(tables, clean_candidate_table)
+  # count rows per candidate (NULL -> 0)
+  candidate_counts <- sapply(cleaned_candidates, function(x) if (is.null(x)) 0 else nrow(x))
+  best_idx <- which.max(candidate_counts)
+  if (length(best_idx) && candidate_counts[best_idx] > 0) {
+    return(cleaned_candidates[[best_idx]])
+  }
+  
+  warning("No suitable table found on page")
+  return(NULL)
+}
+
+# Loop through all passports/demonyms
+visa_tables <- list()
+for (i in seq_len(nrow(visa.data))) {
+  demonym <- visa.data$search[i]
+  url <- visa.data$urls[i]
+  
+  message("Scraping: ", demonym)
+  tbl <- scrape_visa_page(url)
+  if (!is.null(tbl)) {
+    visa_tables[[demonym]] <- tbl
+  } else {
+    warning("Skipping ", demonym, " due to missing or malformed table")
+  }
+}
+```
+
+```{r}
+ui <- fluidPage(
+  
+  # App title
+  titlePanel("Where Can I Go?"),
+  
+  sidebarLayout(
+    
+    # Sidebar inputs
+    sidebarPanel(
+      width = 4,
+      
+      selectInput(
+        inputId = "passport",
+        label = "Select your passport (demonym):",
+        choices = names(visa_tables),   # From the scraped list
+        selected = NULL
+      ),
+      
+      selectInput(
+        inputId = "destination",
+        label = "Select a destination country:",
+        choices = NULL,
+        selected = NULL
+      )
+    ),
+    
+    # Main panel for output
+    mainPanel(
+      width = 8,
+      h3(textOutput("selected_title")),
+      tableOutput("destination.table")
+    )
+  )
+)
+```
+
+```{r}
+#Server for the Shiny App
+server <- function(input, output, session) {
+
+  # When a passport is selected, populate destination countries
+  observeEvent(input$passport, {
+    req(input$passport)
+    
+    countries <- visa_tables[[input$passport]]$Country
+    updateSelectInput(
+      session,
+      "destination",
+      choices = countries,
+      selected = NULL
+    )
+  })
+  
+  # Update title
+  output$selected_title <- renderText({
+    req(input$passport, input$destination)
+    paste("Visa Requirements for", input$passport, "visiting", input$destination)
+  })
+  
+  # Display visa requirement for selected country
+  output$destination.table <- renderTable({
+    req(input$passport, input$destination)
+    tbl <- visa_tables[[input$passport]]
+    tbl[tbl$Country == input$destination, , drop = FALSE]
+  })
+}
+```
+
+```{r}
+shinyApp(ui = ui, server = server)
+```
+
+
+
